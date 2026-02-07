@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import model as ml_logic
 from database import repo
+from app.clients.kafka import kafka_producer
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -30,12 +31,17 @@ class AdResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app):
     await repo.connect()
+
     global ml_model
     ml_model = ml_logic.load_model("model.pkl")
     if ml_model is None:
         ml_model = ml_logic.train_model()
         ml_logic.save_model(ml_model, "model.pkl")
+
+    await kafka_producer.start()
     yield
+
+    await kafka_producer.stop()
     await repo.disconnect()
 
 app = FastAPI(lifespan=lifespan)
@@ -93,6 +99,35 @@ async def simple_predict(item_id: int):
     is_violation = bool(ml_model.predict([features])[0])
     logger.info(f"result: {is_violation}, prob: {prob}")
     return AdResponse(is_violation=is_violation, probability=prob)
+
+
+@app.post("/async_predict")
+async def async_predict(item_id: int):
+    # if not await repo.item_exists(item_id):
+    #     raise HTTPException(status_code=404, detail="item not found")
+
+    task_id = await repo.create_moderation_task(item_id)
+    await kafka_producer.send_moderation_request(item_id, task_id)
+
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "message": "moderation request accepted",
+    }
+
+
+@app.get("/moderation_result/{task_id}")
+async def get_moderation_result(task_id: int):
+    result = await repo.get_moderation_result(task_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="task not found")
+
+    return {
+        "task_id": result["id"],
+        "status": result["status"],
+        "is_violation": result["is_violation"],
+        "probability": result["probability"]
+    }
 
 
 @app.get("/health")

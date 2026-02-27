@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
 from database import repo
 import model as ml_logic
+from app.clients.redis import cache
 
 
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +45,7 @@ async def run_worker():
     await consumer.start()
     await producer.start()
     await repo.connect()
+    await cache.connect()
 
     logger.info("worker started...")
 
@@ -76,6 +78,15 @@ async def run_worker():
                         is_violation,
                         prob
                     )
+
+                    await cache.set_prediction(
+                        item_id,
+                        {
+                            "is_violation": is_violation,
+                            "probability": prob
+                        }
+                    )
+
                     logger.info(f"task {task_id} completed on attempt {attempt}")
                     last_error = None
                     break
@@ -110,8 +121,8 @@ async def run_worker():
     finally:
         await consumer.stop()
         await producer.stop()
+        await cache.disconnect()
         await repo.disconnect()
-
 
 if __name__ == "__main__":
     asyncio.run(run_worker())

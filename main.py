@@ -5,9 +5,13 @@ from pydantic import BaseModel
 import model as ml_logic
 from database import repo
 from app.clients.kafka import kafka_producer
+from app.clients.redis import cache
 
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+)
 logger = logging.getLogger(__name__)
 
 ml_model = None
@@ -39,8 +43,10 @@ async def lifespan(app):
         ml_logic.save_model(ml_model, "model.pkl")
 
     await kafka_producer.start()
+    await cache.connect()
     yield
 
+    await cache.disconnect()
     await kafka_producer.stop()
     await repo.disconnect()
 
@@ -49,6 +55,11 @@ app = FastAPI(lifespan=lifespan)
 
 @app.post("/predict", response_model=AdResponse)
 async def predict(ad: AdRequest):
+    cached = await cache.get_prediction(ad.item_id)
+    if cached:
+        logger.info(f"Cache hit for item {ad.item_id}")
+        return AdResponse(**cached)
+
     if ml_model is None:
         raise HTTPException(status_code=503, detail="model not available")
 
@@ -63,17 +74,28 @@ async def predict(ad: AdRequest):
 
     try:
         prob = ml_model.predict_proba([features])[0][1]
+        is_violation = bool(ml_model.predict([features])[0])
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail="prediction error")
+    result = {
+        "is_violation": is_violation,
+        "probability": prob
+    }
 
-    is_violation = bool(ml_model.predict([features])[0])
     logger.info(f"result: {is_violation}, prob: {prob}")
-    return AdResponse(is_violation=is_violation, probability=prob)
+
+    await cache.set_prediction(ad.item_id, result)
+    return AdResponse(**result)
 
 
 @app.post("/simple_predict", response_model=AdResponse)
 async def simple_predict(item_id: int):
+    cached = await cache.get_prediction(item_id)
+    if cached:
+        logger.info(f"Cache hit for item {item_id}")
+        return AdResponse(**cached)
+
     if ml_model is None:
         raise HTTPException(status_code=503, detail="model not available")
 
@@ -85,26 +107,43 @@ async def simple_predict(item_id: int):
         float(data["is_verified_seller"]),
         data["images_qty"] / 10.0,
         len(data["description"]) / 1000.0,
-        data["category"] / 100.0
+        data["category"] / 100.0,
     ]
 
     logger.info(f"features: {features}")
 
     try:
         prob = ml_model.predict_proba([features])[0][1]
+        is_violation = bool(ml_model.predict([features])[0])
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail="prediction error")
 
-    is_violation = bool(ml_model.predict([features])[0])
+    result = {
+        "is_violation": is_violation,
+        "probability": prob
+    }
+
     logger.info(f"result: {is_violation}, prob: {prob}")
+
+    await cache.set_prediction(item_id, result)
     return AdResponse(is_violation=is_violation, probability=prob)
 
 
 @app.post("/async_predict")
 async def async_predict(item_id: int):
-    # if not await repo.item_exists(item_id):
-    #     raise HTTPException(status_code=404, detail="item not found")
+    cached = await cache.get_prediction(item_id)
+    if cached:
+        logger.info(f"Cache hit for item {item_id}")
+        return {
+            "task_id": None,
+            "status": "cached",
+            "is_violation": cached["is_violation"],
+            "probability": cached["probability"],
+        }
+
+    if not await repo.item_exists(item_id):
+        raise HTTPException(status_code=404, detail="item not found")
 
     task_id = await repo.create_moderation_task(item_id)
     await kafka_producer.send_moderation_request(item_id, task_id)
@@ -122,11 +161,33 @@ async def get_moderation_result(task_id: int):
     if not result:
         raise HTTPException(status_code=404, detail="task not found")
 
+    if result["status"] == "completed":
+        cached = await cache.get_prediction(result["item_id"])
+        if not cached:
+            result = {
+                "is_violation": result["is_violation"],
+                "probability": result["probability"],
+            }
+            await cache.set_prediction(result["item_id"], result)
+
     return {
         "task_id": result["id"],
         "status": result["status"],
         "is_violation": result["is_violation"],
         "probability": result["probability"]
+    }
+
+
+@app.post("/close")
+async def close_item(item_id: int):
+
+    if not await repo.item_exists(item_id):
+        raise HTTPException(status_code=404, detail="Item not found")
+    await repo.delete_item(item_id)
+    await cache.delete_prediction(item_id)
+
+    return {
+        "message": f"Item {item_id} and its results deleted from DB and cache"
     }
 
 

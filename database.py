@@ -100,5 +100,11 @@ class AdRepository:
         async with self.pool.acquire() as conn:
             return await conn.fetchval(query, item_id) is not None
 
+    async def delete_item(self, item_id: int):
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM moderation_results WHERE item_id = $1", item_id)
+                await conn.execute("DELETE FROM items WHERE id = $1", item_id)
+
 
 repo = AdRepository()

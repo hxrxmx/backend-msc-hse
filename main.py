@@ -1,11 +1,33 @@
 import logging
+import time
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import Response
+from prometheus_client import \
+    Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
 import model as ml_logic
 from database import repo
 from app.clients.kafka import kafka_producer
 from app.clients.redis import cache
+from app.metrics.metrics import PREDICTIONS_TOTAL, PREDICTION_DURATION, \
+    PREDICTION_ERRORS, MODEL_PROBABILITY
+
+
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"],
+)
+REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "endpoint"],
+)
 
 
 logging.basicConfig(
@@ -32,6 +54,28 @@ class AdResponse(BaseModel):
     probability: float
 
 
+class PrometheusMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        method = request.method
+        endpoint = request.url.path
+        start_time = time.time()
+
+        response = await call_next(request)
+
+        duration = time.time() - start_time
+        REQUEST_COUNT.labels(
+            method=method,
+            endpoint=endpoint,
+            status=response.status_code
+        ).inc()
+        REQUEST_DURATION.labels(
+            method=method,
+            endpoint=endpoint
+        ).observe(duration)
+
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app):
     await repo.connect()
@@ -50,7 +94,9 @@ async def lifespan(app):
     await kafka_producer.stop()
     await repo.disconnect()
 
+
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(PrometheusMiddleware)
 
 
 @app.post("/predict", response_model=AdResponse)
@@ -72,9 +118,16 @@ async def predict(ad: AdRequest):
 
     logger.info(f"id: {ad.seller_id}/{ad.item_id}, features: {features}")
 
+    start_time = time.time()
     try:
         prob = ml_model.predict_proba([features])[0][1]
         is_violation = bool(ml_model.predict([features])[0])
+
+        PREDICTION_DURATION.observe(time.time() - start_time)
+        MODEL_PROBABILITY.observe(prob)
+        PREDICTIONS_TOTAL.labels(
+            result="violation" if is_violation else "no_violation"
+        ).inc()
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail="prediction error")
@@ -112,9 +165,17 @@ async def simple_predict(item_id: int):
 
     logger.info(f"features: {features}")
 
+    start_time = time.time()
     try:
         prob = ml_model.predict_proba([features])[0][1]
         is_violation = bool(ml_model.predict([features])[0])
+
+        PREDICTION_DURATION.observe(time.time() - start_time)
+        MODEL_PROBABILITY.observe(prob)
+        PREDICTIONS_TOTAL.labels(
+            result="violation" if is_violation else "no_violation"
+        ).inc()
+
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=500, detail="prediction error")
@@ -189,6 +250,11 @@ async def close_item(item_id: int):
     return {
         "message": f"Item {item_id} and its results deleted from DB and cache"
     }
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")

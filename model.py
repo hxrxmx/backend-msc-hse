@@ -7,7 +7,7 @@ import os
 def train_model():
     np.random.seed(42)
     X = np.random.rand(1000, 4)
-    y = (X[:, 0] < 0.3) & (X[:, 1] < 0.2).astype(int)
+    y = (X[:, 0] < 0.3) | (X[:, 1] < 0.2).astype(int)
 
     model = LogisticRegression()
     model.fit(X, y)

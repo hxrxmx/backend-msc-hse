@@ -16,7 +16,7 @@ import app.model.model as ml_logic
 from app.database.database import repo, account_repo
 from app.clients.kafka import kafka_producer
 from app.clients.redis import cache
-from app.account.current import get_current_account, decode_access_token
+from app.account.current import get_current_account
 from app.metrics.metrics import PREDICTIONS_TOTAL, \
     PREDICTION_DURATION, MODEL_PROBABILITY
 

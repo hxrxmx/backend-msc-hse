@@ -1,7 +1,6 @@
 import time
 from typing import Optional
 import asyncpg
-# from passlib.hash import bcrypt
 from hashlib import sha256
 
 

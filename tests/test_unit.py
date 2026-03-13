@@ -1,5 +1,4 @@
 import pytest
-# from fastapi import HTTPException
 from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
@@ -102,26 +101,20 @@ def test_simple_predict_cache():
         assert response.json()["is_violation"] is True
 
 
-# @pytest.mark.asyncio
-# async def test_get_current_account_valid():
-#     mock_repo = AsyncMock()
-#     mock_repo.find_by_id.return_value = {
-#         "id": 1,
-#         "login": "asdjhg",
-#         "is_blocked": False
-#     }
+@pytest.mark.asyncio
+async def test_get_current_account_valid():
+    mock_repo = AsyncMock()
+    mock_repo.find_by_id.return_value = {
+        "id": 1,
+        "login": "asdjhg",
+        "is_blocked": False
+    }
 
-#     with patch("app.main.main.decode_access_token") as mock_decode:
-#         mock_decode.return_value = {"sub": "1"}
-#         with patch("app.main.main.app.state.account_repo", mock_repo):
-#             account = await get_current_account(access_token="valid_token")
-#             assert account["id"] == 1
+    with patch("app.account.current.decode_access_token") as mock_decode, \
+         patch("app.account.current.account_repo", mock_repo):
+        mock_decode.return_value = {"sub": "1"}
 
+        account = await get_current_account(access_token="valid_token")
 
-# @pytest.mark.asyncio
-# async def test_get_current_account_invalid():
-#     with patch("app.main.main.decode_access_token") as mock_decode:
-#         mock_decode.return_value = None
-#         with pytest.raises(HTTPException) as exc:
-#             await get_current_account(access_token="fake_token")
-#         assert exc.value.status_code == 401
+        assert account["id"] == 1
+        mock_repo.find_by_id.assert_called_once_with(1)

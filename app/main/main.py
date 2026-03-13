@@ -3,6 +3,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi import Depends
 from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -10,12 +11,14 @@ from starlette.responses import Response
 from prometheus_client import \
     Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-import model as ml_logic
-from database import repo
+from app.account.auth import create_access_token
+import app.model.model as ml_logic
+from app.database.database import repo, account_repo
 from app.clients.kafka import kafka_producer
 from app.clients.redis import cache
-from app.metrics.metrics import PREDICTIONS_TOTAL, PREDICTION_DURATION, \
-    PREDICTION_ERRORS, MODEL_PROBABILITY
+from app.account.current import get_current_account, decode_access_token
+from app.metrics.metrics import PREDICTIONS_TOTAL, \
+    PREDICTION_DURATION, MODEL_PROBABILITY
 
 
 REQUEST_COUNT = Counter(
@@ -79,6 +82,7 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app):
     await repo.connect()
+    app.state.account_repo = account_repo
 
     global ml_model
     ml_model = ml_logic.load_model("model.pkl")
@@ -100,7 +104,10 @@ app.add_middleware(PrometheusMiddleware)
 
 
 @app.post("/predict", response_model=AdResponse)
-async def predict(ad: AdRequest):
+async def predict(
+    ad: AdRequest,
+    current_user: dict = Depends(get_current_account),
+):
     cached = await cache.get_prediction(ad.item_id)
     if cached:
         logger.info(f"Cache hit for item {ad.item_id}")
@@ -143,7 +150,10 @@ async def predict(ad: AdRequest):
 
 
 @app.post("/simple_predict", response_model=AdResponse)
-async def simple_predict(item_id: int):
+async def simple_predict(
+    item_id: int,
+    current_user: dict = Depends(get_current_account),
+):
     cached = await cache.get_prediction(item_id)
     if cached:
         logger.info(f"Cache hit for item {item_id}")
@@ -192,7 +202,10 @@ async def simple_predict(item_id: int):
 
 
 @app.post("/async_predict")
-async def async_predict(item_id: int):
+async def async_predict(
+    item_id: int,
+    current_user: dict = Depends(get_current_account),
+):
     cached = await cache.get_prediction(item_id)
     if cached:
         logger.info(f"Cache hit for item {item_id}")
@@ -217,7 +230,10 @@ async def async_predict(item_id: int):
 
 
 @app.get("/moderation_result/{task_id}")
-async def get_moderation_result(task_id: int):
+async def get_moderation_result(
+    task_id: int,
+    current_user: dict = Depends(get_current_account),
+):
     result = await repo.get_moderation_result(task_id)
     if not result:
         raise HTTPException(status_code=404, detail="task not found")
@@ -255,6 +271,22 @@ async def close_item(item_id: int):
 @app.get("/metrics")
 async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.post("/login")
+async def login(login_data: dict, response: Response):
+    login = login_data.get("login")
+    password = login_data.get("password")
+
+    account = await app.state.account_repo.verify_password(login, password)
+
+    if not account:
+        raise HTTPException(status_code=401, detail="Invalid login or password")
+
+    token = create_access_token({"sub": str(account["id"])})
+    response.set_cookie(key="access_token", value=token, httponly=True)
+
+    return {"message": "success"}
 
 
 @app.get("/health")

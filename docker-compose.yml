@@ -1,15 +1,17 @@
 version: '3.8'
 
 services:
-  db:
-    image: postgres:15
-    restart: always
+  postgres:
+    image: postgres:16
     environment:
+      POSTGRES_DB: hw
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: postgres
     ports:
-      - "5432:5432"
+      - "5435:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
   redpanda:
     image: redpandadata/redpanda:latest
     command:
@@ -19,9 +21,9 @@ services:
       - --smp
       - "1"
       - --memory
-      - "1G"
+      - 1G
       - --reserve-memory
-      - "0M"
+      - 0M
       - --node-id
       - "0"
       - --check=false
@@ -63,3 +65,6 @@ services:
       - "3000:3000"
     depends_on:
       - prometheus
+
+volumes:
+  pgdata:

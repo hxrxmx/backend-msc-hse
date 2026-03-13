@@ -1,6 +1,9 @@
 import time
 from typing import Optional
 import asyncpg
+# from passlib.hash import bcrypt
+from hashlib import sha256
+
 
 from app.metrics.metrics import DB_QUERY_DURATION
 
@@ -149,4 +152,49 @@ class AdRepository:
         ).observe(time.time() - start_time)
 
 
+class AccountRepository:
+    def __init__(self, pool):
+        self.pool = pool
+
+    def _hash_password(self, password: str) -> str:
+        return sha256(password.encode()).hexdigest()
+
+    async def create(self, login, password):
+        hashed = self._hash_password(password)
+        query = """
+            INSERT INTO account (login, password) VALUES ($1, $2) RETURNING id
+        """
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(query, login, hashed)
+
+    async def find_by_id(self, account_id):
+        query = "SELECT * FROM account WHERE id = $1"
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, account_id)
+
+    async def find_by_login(self, login):
+        query = "SELECT * FROM account WHERE login = $1"
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, login)
+
+    async def delete(self, account_id):
+        query = "DELETE FROM account WHERE id = $1"
+        async with self.pool.acquire() as conn:
+            await conn.execute(query, account_id)
+
+    async def block(self, account_id):
+        query = "UPDATE account SET is_blocked = True WHERE id = $1"
+        async with self.pool.acquire() as conn:
+            await conn.execute(query, account_id)
+
+    async def verify_password(self, login, password):
+        account = await self.find_by_login(login)
+        if not account or account['is_blocked']:
+            return None
+        if self._hash_password(password) == account['password']:
+            return account
+        return None
+
+
 repo = AdRepository()
+account_repo = AccountRepository(repo.pool)

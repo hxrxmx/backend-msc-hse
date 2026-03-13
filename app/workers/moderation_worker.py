@@ -3,8 +3,8 @@ import json
 import logging
 from datetime import datetime, timezone
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
-from database import repo
-import model as ml_logic
+from app.database.database import repo
+import app.model.model as ml_logic
 from app.clients.redis import cache
 
 

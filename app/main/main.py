@@ -4,7 +4,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi import Depends
-from pydantic import BaseModel
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -13,12 +12,15 @@ from prometheus_client import \
 
 from app.account.auth import create_access_token
 import app.model.model as ml_logic
-from app.database.database import repo, account_repo
+from app.database.database import repo
+from app.database.database import AccountRepository
 from app.clients.kafka import kafka_producer
 from app.clients.redis import cache
 from app.account.current import get_current_account
+from app.services.moderation import calculate_prediction
+from app.model.schemas import AdRequest, AdResponse, LoginRequest
 from app.metrics.metrics import PREDICTIONS_TOTAL, \
-    PREDICTION_DURATION, MODEL_PROBABILITY
+    PREDICTION_DURATION, MODEL_PROBABILITY, PREDICTION_ERRORS
 
 
 REQUEST_COUNT = Counter(
@@ -40,21 +42,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 ml_model = None
-
-
-class AdRequest(BaseModel):
-    seller_id: int
-    is_verified_seller: bool
-    item_id: int
-    name: str
-    description: str
-    category: int
-    images_qty: int
-
-
-class AdResponse(BaseModel):
-    is_violation: bool
-    probability: float
 
 
 class PrometheusMiddleware(BaseHTTPMiddleware):
@@ -82,13 +69,10 @@ class PrometheusMiddleware(BaseHTTPMiddleware):
 @asynccontextmanager
 async def lifespan(app):
     await repo.connect()
-    app.state.account_repo = account_repo
+    app.state.account_repo = AccountRepository(repo.pool)
 
     global ml_model
-    ml_model = ml_logic.load_model("model.pkl")
-    if ml_model is None:
-        ml_model = ml_logic.train_model()
-        ml_logic.save_model(ml_model, "model.pkl")
+    ml_model = ml_logic.load_model()
 
     await kafka_producer.start()
     await cache.connect()
@@ -118,35 +102,22 @@ async def predict(
 
     features = [
         float(ad.is_verified_seller),
-        ad.images_qty / 10.0,
-        len(ad.description) / 1000.0,
-        ad.category / 100.0
+        ad.images_qty,
+        len(ad.description),
+        ad.category,
     ]
-
     logger.info(f"id: {ad.seller_id}/{ad.item_id}, features: {features}")
 
-    start_time = time.time()
     try:
-        prob = ml_model.predict_proba([features])[0][1]
-        is_violation = bool(ml_model.predict([features])[0])
-
-        PREDICTION_DURATION.observe(time.time() - start_time)
-        MODEL_PROBABILITY.observe(prob)
-        PREDICTIONS_TOTAL.labels(
-            result="violation" if is_violation else "no_violation"
-        ).inc()
+        res = calculate_prediction(ml_model, *features)
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        raise HTTPException(status_code=500, detail="prediction error")
-    result = {
-        "is_violation": is_violation,
-        "probability": prob
-    }
+        PREDICTION_ERRORS.labels(error_type="prediction").inc()
+        logger.error(f"prediction failed for item {ad.item_id}: {e}")
+        raise HTTPException(status_code=500, detail="prediction failed")
 
-    logger.info(f"result: {is_violation}, prob: {prob}")
-
-    await cache.set_prediction(ad.item_id, result)
-    return AdResponse(**result)
+    logger.info(f"result: {res['is_violation']}, prob: {res['probability']}")
+    await cache.set_prediction(ad.item_id, res)
+    return AdResponse(**res)
 
 
 @app.post("/simple_predict", response_model=AdResponse)
@@ -172,33 +143,18 @@ async def simple_predict(
         len(data["description"]) / 1000.0,
         data["category"] / 100.0,
     ]
-
     logger.info(f"features: {features}")
 
-    start_time = time.time()
     try:
-        prob = ml_model.predict_proba([features])[0][1]
-        is_violation = bool(ml_model.predict([features])[0])
-
-        PREDICTION_DURATION.observe(time.time() - start_time)
-        MODEL_PROBABILITY.observe(prob)
-        PREDICTIONS_TOTAL.labels(
-            result="violation" if is_violation else "no_violation"
-        ).inc()
-
+        res = calculate_prediction(ml_model, *features)
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        raise HTTPException(status_code=500, detail="prediction error")
+        PREDICTION_ERRORS.labels(error_type="prediction").inc()
+        logger.error(f"prediction failed for item {item_id}: {e}")
+        raise HTTPException(status_code=500, detail="prediction failed")
 
-    result = {
-        "is_violation": is_violation,
-        "probability": prob
-    }
-
-    logger.info(f"result: {is_violation}, prob: {prob}")
-
-    await cache.set_prediction(item_id, result)
-    return AdResponse(is_violation=is_violation, probability=prob)
+    logger.info(f"result: {res['is_violation']}, prob: {res['probability']}")
+    await cache.set_prediction(item_id, res)
+    return AdResponse(**res)
 
 
 @app.post("/async_predict")
@@ -274,9 +230,9 @@ async def metrics():
 
 
 @app.post("/login")
-async def login(login_data: dict, response: Response):
-    login = login_data.get("login")
-    password = login_data.get("password")
+async def login(login_data: LoginRequest, response: Response):
+    login = login_data.login
+    password = login_data.password
 
     account = await app.state.account_repo.verify_password(login, password)
 

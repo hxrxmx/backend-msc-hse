@@ -2,10 +2,13 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer
+
 from app.database.database import repo
 import app.model.model as ml_logic
 from app.clients.redis import cache
+from app.services.moderation import calculate_prediction
 
 
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +36,7 @@ async def send_to_dlq(producer, msg, error):
 
 
 async def run_worker():
-    model = ml_logic.load_model("model.pkl") or ml_logic.train_model()
+    model = ml_logic.load_model()
 
     consumer = AIOKafkaConsumer(
         TOPIC_MODERATION,
@@ -61,31 +64,24 @@ async def run_worker():
                 try:
                     item = await repo.get_item_with_seller(item_id)
                     if not item:
-                        raise ValueError(f"{item_id} not found in db")
+                        raise ValueError(f"item {item_id} not found")
 
-                    features = [
-                        float(item["is_verified_seller"]),
-                        item["images_qty"] / 10.0,
-                        len(item["description"]) / 1000.0,
-                        item["category"] / 100.0
-                    ]
-                    prob = model.predict_proba([features])[0][1]
-                    is_violation = bool(model.predict([features])[0])
+                    res = calculate_prediction(
+                        model,
+                        item["is_verified_seller"],
+                        item["images_qty"],
+                        item["description"],
+                        item["category"],
+                    )
 
                     await repo.update_moderation_result(
                         task_id,
                         "completed",
-                        is_violation,
-                        prob
+                        res["is_violation"],
+                        res["probability"],
                     )
 
-                    await cache.set_prediction(
-                        item_id,
-                        {
-                            "is_violation": is_violation,
-                            "probability": prob
-                        }
-                    )
+                    await cache.set_prediction(item_id, res)
 
                     logger.info(f"task {task_id} completed on attempt {attempt}")
                     last_error = None

@@ -7,7 +7,7 @@ from hashlib import sha256
 from app.metrics.metrics import DB_QUERY_DURATION
 
 
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/postgres"
+DATABASE_URL = "postgresql://postgres:postgres@localhost:5435/hw"
 
 
 class AdRepository:
@@ -34,7 +34,7 @@ class AdRepository:
             result = await conn.fetchrow(query, item_id)
 
         DB_QUERY_DURATION.labels(
-            query_type="get_item_with_seller"
+            query_type="select"
         ).observe(time.time() - start_time)
         return result
 
@@ -61,7 +61,7 @@ class AdRepository:
 
         start_time = time.time()
         async with self.pool.acquire() as conn:
-            result = await conn.fetchval(
+            res = await conn.fetchval(
                 query,
                 seller_id,
                 name,
@@ -71,9 +71,9 @@ class AdRepository:
             )
 
         DB_QUERY_DURATION.labels(
-            query_type="create_item"
+            query_type="insert"
         ).observe(time.time() - start_time)
-        return result
+        return res
 
     async def create_moderation_task(self, item_id: int):
         query = """
@@ -82,11 +82,12 @@ class AdRepository:
         """
         start_time = time.time()
         async with self.pool.acquire() as conn:
-            return await conn.fetchval(query, item_id)
+            res = await conn.fetchval(query, item_id)
 
         DB_QUERY_DURATION.labels(
-            query_type="create_moderation_task"
+            query_type="insert"
         ).observe(time.time() - start_time)
+        return res
 
     async def get_moderation_result(self, task_id: int):
         query = """
@@ -94,11 +95,12 @@ class AdRepository:
         """
         start_time = time.time()
         async with self.pool.acquire() as conn:
-            return await conn.fetchrow(query, task_id)
+            res = await conn.fetchrow(query, task_id)
 
         DB_QUERY_DURATION.labels(
-            query_type="get_moderation_result"
+            query_type="select"
         ).observe(time.time() - start_time)
+        return res
 
     async def update_moderation_result(
         self,
@@ -133,11 +135,13 @@ class AdRepository:
         start_time = time.time()
 
         async with self.pool.acquire() as conn:
-            return await conn.fetchval(query, item_id) is not None
+            res = await conn.fetchval(query, item_id) is not None
 
         DB_QUERY_DURATION.labels(
-            query_type="item_exists"
+            query_type="select"
         ).observe(time.time() - start_time)
+
+        return res
 
     async def delete_item(self, item_id: int):
         start_time = time.time()
@@ -196,4 +200,3 @@ class AccountRepository:
 
 
 repo = AdRepository()
-account_repo = AccountRepository(repo.pool)
